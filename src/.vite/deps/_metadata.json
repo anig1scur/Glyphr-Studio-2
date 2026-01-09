@@ -1,0 +1,25 @@
+{
+  "hash": "efc52811",
+  "configHash": "13c0cc38",
+  "lockfileHash": "5a96355c",
+  "browserHash": "4e9cf40f",
+  "optimized": {
+    "svg-to-bezier": {
+      "src": "../../../node_modules/svg-to-bezier/dist/svg-to-bezier/svg-to-bezier.js",
+      "file": "svg-to-bezier.js",
+      "fileHash": "96a561bd",
+      "needsInterop": false
+    },
+    "paper/dist/paper-core": {
+      "src": "../../../node_modules/paper/dist/paper-core.js",
+      "file": "paper_dist_paper-core.js",
+      "fileHash": "6564c260",
+      "needsInterop": true
+    }
+  },
+  "chunks": {
+    "chunk-BUSYA2B4": {
+      "file": "chunk-BUSYA2B4.js"
+    }
+  }
+}
