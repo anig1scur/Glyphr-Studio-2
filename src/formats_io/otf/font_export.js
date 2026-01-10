@@ -53,9 +53,11 @@ export async function ioFont_exportFont() {
 			options.glyphs.push(exportedItem);
 		}
 	}
-	showToast('Finalizing...');
+  showToast('Finalizing binary font data...<br>This may take a minute for large fonts.', 999999);
+  console.log(`[Export] Starting binary serialization for ${options.glyphs.length} glyphs...`);
+  await pause(500);
 
-	// log(`\n⮟options.glyphs⮟`);
+  // log(`\n⮟options.glyphs⮟`);
 	// log(options.glyphs);
 
 	// Create Font
@@ -110,9 +112,12 @@ function saveOTFFile(font) {
 		const familyName = font.getEnglishName('fontFamily');
 		const styleName = font.getEnglishName('fontSubfamily');
 		const fileName = familyName.replace(/\s/g, '') + '-' + styleName + '.otf';
-		// log(`\n⮟font⮟`);
-		// log(font);
+    console.log('[Export] Converting font to ArrayBuffer...');
+    const innerStartTime = performance.now();
 		const arrayBuffer = font.toArrayBuffer();
+    console.log(`[Export] Binary buffer generated in ${(performance.now() - innerStartTime).toFixed(2)}ms`);
+    console.log(`[Export] Final font size: ${(arrayBuffer.byteLength / 1024 / 1024).toFixed(2)} MB`);
+
 		const dataView = new DataView(arrayBuffer);
 		const blob = new Blob([dataView], { type: 'font/opentype' });
 

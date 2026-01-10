@@ -1216,32 +1216,52 @@ encode.VARDELTAS = function(deltas) {
   }
   return result;
 };
+
 encode.INDEX = function(l) {
-  let offset = 1;
-  const offsets = [offset];
-  const data = [];
+  if (l.length === 0) {
+    return new Uint8Array([0, 0]);
+  }
+  const encodedObjects = new Array(l.length);
+  let totalDataLength = 0;
   for (let i = 0; i < l.length; i += 1) {
     const v = encode.OBJECT(l[i]);
-    Array.prototype.push.apply(data, v);
-    offset += v.length;
-    offsets.push(offset);
+    const typedV = v instanceof Uint8Array ? v : new Uint8Array(v);
+    encodedObjects[i] = typedV;
+    totalDataLength += typedV.length;
   }
-  if (data.length === 0) {
-    return [0, 0];
+
+  const offsets = new Array(l.length + 1);
+  let currentOffset = 1;
+  offsets[0] = currentOffset;
+  for (let i = 0;i < l.length;i++) {
+    currentOffset += encodedObjects[i].length;
+    offsets[i + 1] = currentOffset;
   }
-  const encodedOffsets = [];
-  const offSize = 1 + Math.floor(Math.log(offset) / Math.log(2)) / 8 | 0;
+
+  const offSize = 1 + Math.floor(Math.log(currentOffset) / Math.log(2)) / 8 | 0;
   const offsetEncoder = [void 0, encode.BYTE, encode.USHORT, encode.UINT24, encode.ULONG][offSize];
+
+  const header = encode.Card16(l.length);
+  const sizeField = encode.OffSize(offSize);
+  const encodedOffsets = new Uint8Array((l.length + 1) * offSize);
   for (let i = 0; i < offsets.length; i += 1) {
-    const encodedOffset = offsetEncoder(offsets[i]);
-    Array.prototype.push.apply(encodedOffsets, encodedOffset);
+    const offBytes = offsetEncoder(offsets[i]);
+    for (let j = 0;j < offSize;j++) {
+      encodedOffsets[i * offSize + j] = offBytes[j];
+    }
   }
-  return Array.prototype.concat(
-    encode.Card16(l.length),
-    encode.OffSize(offSize),
-    encodedOffsets,
-    data
-  );
+
+  const totalLength = header.length + sizeField.length + encodedOffsets.length + totalDataLength;
+  const result = new Uint8Array(totalLength);
+  let pos = 0;
+  result.set(header, pos); pos += header.length;
+  result.set(sizeField, pos); pos += sizeField.length;
+  result.set(encodedOffsets, pos); pos += encodedOffsets.length;
+  for (let i = 0;i < encodedObjects.length;i++) {
+    result.set(encodedObjects[i], pos);
+    pos += encodedObjects[i].length;
+  }
+  return result;
 };
 sizeOf.INDEX = function(v) {
   return encode.INDEX(v).length;
@@ -1330,10 +1350,11 @@ encode.CHARSTRING = function(ops) {
       d.push(enc1[j]);
     }
   }
+  const result = new Uint8Array(d);
   if (wmm) {
-    wmm.set(ops, d);
+    wmm.set(ops, result);
   }
-  return d;
+  return result;
 };
 sizeOf.CHARSTRING = function(ops) {
   return encode.CHARSTRING(ops).length;
@@ -1348,11 +1369,42 @@ sizeOf.OBJECT = function(v) {
   check_default.argument(sizeOfFunction !== void 0, "No sizeOf function for type " + v.type);
   return sizeOfFunction(v.value);
 };
+function flattenChunks (chunks) {
+  let totalLength = 0;
+  for (let i = 0;i < chunks.length;i += 1) {
+    const chunk = chunks[i];
+    if (chunk === void 0 || chunk === null) continue;
+    if (typeof chunk.length === "number") {
+      totalLength += chunk.length;
+    } else {
+      totalLength += 1;
+    }
+  }
+  const result = new Uint8Array(totalLength);
+  let pos = 0;
+  for (let i = 0;i < chunks.length;i += 1) {
+    const chunk = chunks[i];
+    if (chunk === void 0 || chunk === null) continue;
+    if (typeof chunk.length === "number") {
+      result.set(chunk, pos);
+      pos += chunk.length;
+    } else {
+      result[pos] = chunk;
+      pos += 1;
+    }
+  }
+  return result;
+}
 encode.TABLE = function(table) {
-  let d = [];
+  if (table._encodedBytes) {
+    return table._encodedBytes;
+  }
   const length = (table.fields || []).length;
   const subtables = [];
   const subtableOffsets = [];
+  const d = [];
+  let currentOffset = 0;
+
   for (let i = 0; i < length; i += 1) {
     const field = table.fields[i];
     const encodingFunction = encode[field.type];
@@ -1363,28 +1415,43 @@ encode.TABLE = function(table) {
     }
     const bytes = encodingFunction(value);
     if (field.type === "TABLE") {
-      if (value.fields !== null) {
-        subtableOffsets.push(d.length);
-        subtables.push(bytes);
-      }
-      d.push(...[0, 0]);
+      subtableOffsets.push(d.length);
+      subtables.push(bytes);
+      d.push(new Uint8Array([0, 0]));
+      currentOffset += 2;
     } else {
-      for (let j = 0; j < bytes.length; j++) {
-        d.push(bytes[j]);
+      d.push(bytes);
+      if (bytes && typeof bytes.length === "number") {
+        currentOffset += bytes.length;
+      } else {
+        currentOffset += 1;
       }
     }
   }
-  for (let i = 0; i < subtables.length; i += 1) {
-    const o = subtableOffsets[i];
-    const offset = d.length;
-    check_default.argument(offset < 65536, "Table " + table.tableName + " too big.");
-    d[o] = offset >> 8;
-    d[o + 1] = offset & 255;
-    for (let j = 0; j < subtables[i].length; j++) {
-      d.push(subtables[i][j]);
-    }
+
+  if (subtables.length === 0) {
+    return flattenChunks(d);
   }
-  return d;
+
+  // Tables with subtable offsets (GSUB, cmap, etc.)
+  // We compute total headers length first
+  let headerLength = 0;
+  for (let i = 0;i < d.length;i++) {
+    headerLength += (d[i] && typeof d[i].length === "number") ? d[i].length : 1;
+  }
+
+  let runningOffset = headerLength;
+  for (let i = 0;i < subtables.length;i++) {
+    const dIndex = subtableOffsets[i];
+    const subtableBytes = subtables[i];
+    const offset = runningOffset;
+    check_default.argument(offset < 65536, "Table " + table.tableName + " too big.");
+    d[dIndex][0] = offset >> 8;
+    d[dIndex][1] = offset & 255;
+    runningOffset += subtableBytes.length;
+  }
+
+  return flattenChunks(d.concat(subtables));
 };
 sizeOf.TABLE = function(table) {
   let numBytes = 0;
@@ -1435,7 +1502,9 @@ function Table(tableName, fields, options) {
   }
 }
 Table.prototype.encode = function() {
-  return encode.TABLE(this);
+  if (this._encodedBytes) return this._encodedBytes;
+  this._encodedBytes = encode.TABLE(this);
+  return this._encodedBytes;
 };
 Table.prototype.sizeOf = function() {
   return sizeOf.TABLE(this);
@@ -3618,6 +3687,27 @@ function makeCmapTable(glyphs) {
   t.segments.sort(function(a, b) {
     return a.start - b.start;
   });
+
+  const mergedSegments = [];
+  if (t.segments.length > 0) {
+    let currentSegment = t.segments[0];
+    for (i = 1;i < t.segments.length;i += 1) {
+      const nextSegment = t.segments[i];
+      if (
+        nextSegment.start === currentSegment.end + 1 &&
+        nextSegment.delta === currentSegment.delta &&
+        nextSegment.offset === currentSegment.offset
+      ) {
+        currentSegment.end = nextSegment.end;
+      } else {
+        mergedSegments.push(currentSegment);
+        currentSegment = nextSegment;
+      }
+    }
+    mergedSegments.push(currentSegment);
+  }
+  t.segments = mergedSegments;
+
   addTerminatorSegment(t);
   const segCount = t.segments.length;
   let segCountToRemove = 0;
@@ -9459,14 +9549,16 @@ function log2(v) {
   return Math.log(v) / Math.log(2) | 0;
 }
 function computeCheckSum(bytes) {
-  while (bytes.length % 4 !== 0) {
-    bytes.push(0);
-  }
+  const length = bytes.length;
+  const padding = (4 - length % 4) % 4;
   let sum = 0;
-  for (let i = 0; i < bytes.length; i += 4) {
-    sum += (bytes[i] << 24) + (bytes[i + 1] << 16) + (bytes[i + 2] << 8) + bytes[i + 3];
+  for (let i = 0;i < length;i += 4) {
+    let b1 = bytes[i];
+    let b2 = i + 1 < length ? bytes[i + 1] : 0;
+    let b3 = i + 2 < length ? bytes[i + 2] : 0;
+    let b4 = i + 3 < length ? bytes[i + 3] : 0;
+    sum = (sum + ((b1 << 24) >>> 0) + (b2 << 16) + (b3 << 8) + b4) >>> 0;
   }
-  sum %= Math.pow(2, 32);
   return sum;
 }
 function makeTableRecord(tag, checkSum, offset, length) {
